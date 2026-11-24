@@ -593,11 +593,17 @@ fn liveness(blocks: &[Block], order: &[usize]) -> (Vec<RegSet>, Vec<RegSet>) {
 /// arguments are all one value (or the phi itself) are replaced by it.
 fn remove_trivial_phis(blocks: &mut [Block], values: u32) {
     let mut replaced: Vec<Value> = (0..values).map(Value).collect();
-    let find = |replaced: &[Value], mut v: Value| {
-        while replaced[v.0 as usize] != v {
-            v = replaced[v.0 as usize];
+    let find = |replaced: &mut [Value], mut v: Value| {
+        let mut root = v;
+        while replaced[root.0 as usize] != root {
+            root = replaced[root.0 as usize];
         }
-        v
+        while replaced[v.0 as usize] != root {
+            let next = replaced[v.0 as usize];
+            replaced[v.0 as usize] = root;
+            v = next;
+        }
+        root
     };
     let mut changed = true;
     while changed {
@@ -606,7 +612,7 @@ fn remove_trivial_phis(blocks: &mut [Block], values: u32) {
             block.phis.retain(|phi| {
                 let mut only = None;
                 for &a in &phi.args {
-                    let a = find(&replaced, a);
+                    let a = find(&mut replaced, a);
                     if a == phi.value || Some(a) == only {
                         continue;
                     }
@@ -625,12 +631,12 @@ fn remove_trivial_phis(blocks: &mut [Block], values: u32) {
     for block in blocks {
         for phi in &mut block.phis {
             for a in &mut phi.args {
-                *a = find(&replaced, *a);
+                *a = find(&mut replaced, *a);
             }
         }
         for inst in &mut block.insts {
             for (_, v) in &mut inst.reads {
-                *v = find(&replaced, *v);
+                *v = find(&mut replaced, *v);
             }
         }
     }
@@ -1223,5 +1229,42 @@ mod tests {
         assert_eq!(vgprs(&movrels.reads), [4, 5, 0]);
         assert_eq!(movrels.read(Reg::V(4)), movreld.write(Reg::V(4)));
         assert!(build(&code, false, 4).is_err(), "v4 is past 4 VGPRs");
+    }
+
+    #[test]
+    fn trivial_phi_chains_compress_to_root() {
+        let p = build_words(&[0xBF80_0000, S_ENDPGM], false);
+        let inst = &p.blocks[0].insts[0];
+        let mut blocks = vec![Block {
+            offset: 0,
+            preds: vec![],
+            insts: vec![Inst {
+                machine: inst.machine.clone(),
+                fields: inst.fields.clone(),
+                reads: vec![(Reg::S(0), Value(4))],
+                writes: vec![(Reg::S(1), Value(5))],
+            }],
+            phis: vec![
+                Phi {
+                    reg: Reg::S(0),
+                    value: Value(2),
+                    args: vec![Value(1)],
+                },
+                Phi {
+                    reg: Reg::S(0),
+                    value: Value(3),
+                    args: vec![Value(2)],
+                },
+                Phi {
+                    reg: Reg::S(0),
+                    value: Value(4),
+                    args: vec![Value(3)],
+                },
+            ],
+            exit: Exit::End,
+        }];
+        remove_trivial_phis(&mut blocks, 6);
+        assert!(blocks[0].phis.is_empty());
+        assert_eq!(blocks[0].insts[0].reads[0].1, Value(1));
     }
 }
